@@ -30,6 +30,7 @@
     "dev": "tsx src/cli.ts",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "test:coverage": "node --test --experimental-test-coverage --import tsx 'test/**/*.test.ts'",
+    "compare:renders": "node scripts/compare-renders.mjs",
     "check": "npm run build && npm test"
   },
   "engines": {

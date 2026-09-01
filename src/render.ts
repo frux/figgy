@@ -10,9 +10,27 @@ import {
 } from "@open-pencil/core/io/formats/raster";
 import { renderNodesToSVG } from "@open-pencil/core/io/formats/svg";
 import { computeAllLayouts } from "@open-pencil/core/layout";
-import { fontManager } from "@open-pencil/core/text";
+import {
+  fontFaceDemand,
+  fontManager,
+  fontResolver,
+  weightToStyle,
+} from "@open-pencil/core/text";
+import {
+  alignGeometryWindingRules,
+  convertFigmaTransformProps,
+  resolveGeometryPaths,
+} from "@open-pencil/fig/node-change";
+import {
+  TransformMatrix,
+  getNodeLocalMatrix,
+  getWorldMatrix,
+  type Mat3,
+  type SceneNode,
+} from "@open-pencil/scene-graph";
 
 import { FiggyError, describeError } from "./errors.js";
+import { createSystemFontLoader } from "./fonts.js";
 import { normalizeNodeId } from "./model.js";
 
 export type RenderFormat = "png" | "svg";
@@ -43,6 +61,7 @@ const MAX_MAX_DIMENSION = 8192;
 const MAX_RASTER_PIXELS = 4096 * 4096;
 const MIN_SCALE = 0.01;
 const MAX_SCALE = 8;
+const FIGMA_DERIVED_GLYPH_FAMILY = "__figgy_figma_derived_glyphs__";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -166,6 +185,413 @@ function rasterGeometry(
   return { scale, width, height };
 }
 
+function preferFigmaDerivedText(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+): void {
+  for (const node of graph.getAllNodes()) {
+    if (node.type !== "TEXT" || !node.figmaDerivedTextGlyphs?.length) continue;
+
+    // The FIG payload stores the exact glyph outlines and positions used by
+    // Figma. OpenPencil normally uses those only after a font lookup fails.
+    // Mark a private synthetic family as exhausted so the headless renderer
+    // selects the embedded outlines immediately instead of reshaping the text
+    // with a possibly different locally-installed font version.
+    node.fontFamily = FIGMA_DERIVED_GLYPH_FAMILY;
+    // Headless PNG export installs a CanvasKit text measurer and recomputes
+    // auto-layout once more. Re-measuring an imported FIG text node can change
+    // its stored height and move later siblings even though both its glyphs and
+    // layout size are already authoritative.
+    node.textAutoResize = "NONE";
+    const style = weightToStyle(node.fontWeight, node.italic);
+    fontResolver.exhaust(
+      fontFaceDemand(FIGMA_DERIVED_GLYPH_FAMILY, style, node.text),
+    );
+  }
+}
+
+function figmaGuid(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const sessionID = value.sessionID;
+  const localID = value.localID;
+  return Number.isInteger(sessionID) && Number.isInteger(localID)
+    ? `${String(sessionID)}:${String(localID)}`
+    : undefined;
+}
+
+function embeddedFigmaBlob(value: unknown): Uint8Array | undefined {
+  if (!isRecord(value)) return undefined;
+  const wrapped = value.__openPencilFigmaBlob;
+  if (wrapped instanceof Uint8Array) return wrapped;
+  if (!isRecord(wrapped)) return undefined;
+  const entries = Object.entries(wrapped)
+    .filter(([key, byte]) => /^\d+$/.test(key) && Number.isInteger(byte))
+    .sort(([left], [right]) => Number(left) - Number(right));
+  return entries.length > 0
+    ? new Uint8Array(entries.map(([, byte]) => Number(byte)))
+    : undefined;
+}
+
+function derivedTextGlyphs(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.glyphs)) return [];
+  return value.glyphs.flatMap((candidate) => {
+    if (!isRecord(candidate) || !isRecord(candidate.position)) return [];
+    const commandsBlob = embeddedFigmaBlob(candidate.commandsBlob);
+    const x = candidate.position.x;
+    const y = candidate.position.y;
+    const fontSize = candidate.fontSize;
+    if (
+      !commandsBlob ||
+      typeof x !== "number" ||
+      typeof y !== "number" ||
+      typeof fontSize !== "number"
+    ) {
+      return [];
+    }
+    return [{ commandsBlob, x, y, fontSize }];
+  });
+}
+
+function derivedGeometryPaths(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const blobs: Uint8Array[] = [];
+  const paths: Array<{
+    windingRule?: string;
+    commandsBlob: number;
+    styleID?: number;
+  }> = [];
+  for (const candidate of value) {
+    if (!isRecord(candidate)) continue;
+    const commandsBlob = embeddedFigmaBlob(candidate.commandsBlob);
+    if (!commandsBlob) continue;
+    const blobIndex = blobs.push(commandsBlob) - 1;
+    paths.push({
+      commandsBlob: blobIndex,
+      ...(typeof candidate.windingRule === "string"
+        ? { windingRule: candidate.windingRule }
+        : {}),
+      ...(typeof candidate.styleID === "number"
+        ? { styleID: candidate.styleID }
+        : {}),
+    });
+  }
+  return resolveGeometryPaths(paths, blobs);
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function figmaLinearTransform(node: SceneNode): Mat3 | undefined {
+  const raw = node.source.fig.rawTransform;
+  if (!isRecord(raw)) return undefined;
+  const m00 = numberField(raw.m00);
+  const m01 = numberField(raw.m01);
+  const m10 = numberField(raw.m10);
+  const m11 = numberField(raw.m11);
+  if (
+    m00 === undefined ||
+    m01 === undefined ||
+    m10 === undefined ||
+    m11 === undefined
+  ) {
+    return undefined;
+  }
+  const current = getNodeLocalMatrix(node);
+  return [m00, m01, current[2]!, m10, m11, current[5]!, 0, 0, 1];
+}
+
+function matrixDiffers(left: Mat3, right: Mat3, epsilon = 0.000001): boolean {
+  return left.some((value, index) => Math.abs(value - right[index]!) > epsilon);
+}
+
+function transformCommandsBlob(blob: Uint8Array, matrix: Mat3): Uint8Array {
+  const output = new Uint8Array(blob);
+  const view = new DataView(
+    output.buffer,
+    output.byteOffset,
+    output.byteLength,
+  );
+  let offset = 0;
+  const transformPoints = (count: number): boolean => {
+    const byteLength = count * 8;
+    if (offset + byteLength > output.byteLength) return false;
+    for (let index = 0; index < count; index += 1) {
+      const x = view.getFloat32(offset, true);
+      const y = view.getFloat32(offset + 4, true);
+      view.setFloat32(
+        offset,
+        matrix[0]! * x + matrix[1]! * y + matrix[2]!,
+        true,
+      );
+      view.setFloat32(
+        offset + 4,
+        matrix[3]! * x + matrix[4]! * y + matrix[5]!,
+        true,
+      );
+      offset += 8;
+    }
+    return true;
+  };
+
+  while (offset < output.byteLength) {
+    const command = output[offset];
+    offset += 1;
+    if (command === undefined) return blob;
+    if (command === 0) continue;
+    const pointCount = command === 1 || command === 2 ? 1 : command === 3 ? 2 : 3;
+    if (command < 1 || command > 4 || !transformPoints(pointCount)) return blob;
+  }
+  return output;
+}
+
+function restoreFigmaAffineTransforms(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+): void {
+  const exactWorldByNode = new Map<string, Mat3>();
+  const exactWorld = (node: SceneNode): Mat3 => {
+    const cached = exactWorldByNode.get(node.id);
+    if (cached) return cached;
+    const currentLocal = getNodeLocalMatrix(node);
+    const rawLocal = figmaLinearTransform(node);
+    const local = rawLocal && matrixDiffers(rawLocal, currentLocal)
+      ? rawLocal
+      : currentLocal;
+    const parent = node.parentId ? graph.getNode(node.parentId) : undefined;
+    const world = parent
+      ? TransformMatrix.multiply(exactWorld(parent), local)
+      : local;
+    exactWorldByNode.set(node.id, world);
+    return world;
+  };
+
+  for (const node of graph.getAllNodes()) {
+    if (
+      node.fillGeometry.length === 0 &&
+      node.strokeGeometry.length === 0 &&
+      !node.figmaDerivedTextGlyphs?.length
+    ) {
+      continue;
+    }
+    const inverseCurrent = TransformMatrix.invert(getWorldMatrix(node, graph));
+    if (!inverseCurrent) continue;
+    const correction = TransformMatrix.multiply(inverseCurrent, exactWorld(node));
+    if (!matrixDiffers(correction, TransformMatrix.identity())) continue;
+
+    node.fillGeometry = node.fillGeometry.map((geometry) => ({
+      ...geometry,
+      commandsBlob: transformCommandsBlob(geometry.commandsBlob, correction),
+    }));
+    node.strokeGeometry = node.strokeGeometry.map((geometry) => ({
+      ...geometry,
+      commandsBlob: transformCommandsBlob(geometry.commandsBlob, correction),
+    }));
+    if (node.figmaDerivedTextGlyphs?.length) {
+      const glyphCorrection: Mat3 = [
+        correction[0]!,
+        -correction[1]!,
+        0,
+        -correction[3]!,
+        correction[4]!,
+        0,
+        0,
+        0,
+        1,
+      ];
+      node.figmaDerivedTextGlyphs = node.figmaDerivedTextGlyphs.map((glyph) => {
+        const position = TransformMatrix.mapPoint(correction, {
+          x: glyph.x,
+          y: glyph.y,
+        });
+        return {
+          ...glyph,
+          x: position.x,
+          y: position.y,
+          commandsBlob: transformCommandsBlob(
+            glyph.commandsBlob,
+            glyphCorrection,
+          ),
+        };
+      });
+    }
+  }
+}
+
+function preferImportedBooleanGeometry(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+): void {
+  for (const node of graph.getAllNodes()) {
+    if (node.type !== "BOOLEAN_OPERATION" || node.fillGeometry.length === 0) {
+      continue;
+    }
+
+    // OpenPencil normally recomputes boolean operations from their children.
+    // Its child-path transform supports translation, rotation, and flips, but
+    // not the general affine matrices stored by Figma. Keeping the imported
+    // contour avoids losing shear a second time; boolean nodes never render
+    // their children as independent scene content.
+    node.childIds = [];
+  }
+}
+
+function findOverrideDescendant(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+  rootId: string,
+  overrideKey: string,
+) {
+  const root = graph.getNode(rootId);
+  const queue = root ? [...root.childIds] : [];
+  for (let index = 0; index < queue.length; index += 1) {
+    const node = graph.getNode(queue[index]!);
+    if (!node) continue;
+    if (node.overrideKey === overrideKey) return node;
+    queue.push(...node.childIds);
+  }
+  return undefined;
+}
+
+function resolveOverridePath(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+  instanceId: string,
+  rawPath: unknown,
+) {
+  if (!Array.isArray(rawPath)) return undefined;
+  const path = rawPath.map(figmaGuid);
+  if (path.some((value) => value === undefined)) return undefined;
+
+  let target = graph.getNode(instanceId);
+  for (const overrideKey of path) {
+    if (!target) return undefined;
+    target = findOverrideDescendant(graph, target.id, overrideKey as string);
+  }
+  return target;
+}
+
+function restoreInheritedSymbolVisibility(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+): void {
+  const directOverrides = new Map<string, boolean>();
+  for (const instance of graph.getAllNodes()) {
+    if (instance.type !== "INSTANCE") continue;
+    for (const override of instance.source.fig.symbolOverrides) {
+      if (!isRecord(override) || typeof override.visible !== "boolean") continue;
+      const guidPath = isRecord(override.guidPath)
+        ? override.guidPath.guids
+        : undefined;
+      const target = resolveOverridePath(graph, instance.id, guidPath);
+      if (target) directOverrides.set(target.id, override.visible);
+    }
+  }
+
+  if (directOverrides.size === 0) return;
+  const clonesByComponent = new Map<string, string[]>();
+  for (const node of graph.getAllNodes()) {
+    if (!node.componentId) continue;
+    const clones = clonesByComponent.get(node.componentId) ?? [];
+    clones.push(node.id);
+    clonesByComponent.set(node.componentId, clones);
+  }
+
+  for (const [targetId, visible] of directOverrides) {
+    const target = graph.getNode(targetId);
+    if (target) target.visible = visible;
+    const queue = [...(clonesByComponent.get(targetId) ?? [])];
+    for (let index = 0; index < queue.length; index += 1) {
+      const cloneId = queue[index]!;
+      if (directOverrides.has(cloneId)) continue;
+      const clone = graph.getNode(cloneId);
+      if (!clone) continue;
+      clone.visible = visible;
+      queue.push(...(clonesByComponent.get(cloneId) ?? []));
+    }
+  }
+}
+
+function restoreDerivedInstanceData(
+  graph: Awaited<ReturnType<typeof parseOpenPencilFigFile>>,
+): void {
+  for (const instance of graph.getAllNodes()) {
+    if (instance.type !== "INSTANCE") continue;
+    const entries = instance.source.fig.derivedSymbolData;
+    if (!Array.isArray(entries)) continue;
+
+    for (const entry of entries) {
+      if (!isRecord(entry) || !isRecord(entry.guidPath)) continue;
+      const glyphs = derivedTextGlyphs(entry.derivedTextData);
+      const fillGeometry = derivedGeometryPaths(entry.fillGeometry);
+      const strokeGeometry = derivedGeometryPaths(entry.strokeGeometry);
+      const target = resolveOverridePath(
+        graph,
+        instance.id,
+        entry.guidPath.guids,
+      );
+      if (!target) continue;
+
+      const derivedLayout = { ...(target.figmaDerivedLayout ?? {}) };
+      if (isRecord(entry.size)) {
+        if (typeof entry.size.x === "number") {
+          target.width = entry.size.x;
+          derivedLayout.width = entry.size.x;
+        }
+        if (typeof entry.size.y === "number") {
+          target.height = entry.size.y;
+          derivedLayout.height = entry.size.y;
+        }
+      }
+      if (isRecord(entry.transform)) {
+        const transformed = convertFigmaTransformProps({
+          transform: entry.transform,
+          size: isRecord(entry.size)
+            ? entry.size
+            : { x: target.width, y: target.height },
+        } as unknown as Parameters<typeof convertFigmaTransformProps>[0]);
+        target.x = transformed.x;
+        target.y = transformed.y;
+        target.rotation = transformed.rotation;
+        target.flipX = transformed.flipX;
+        target.flipY = transformed.flipY;
+        derivedLayout.x = transformed.x;
+        derivedLayout.y = transformed.y;
+      } else if (glyphs.length > 0) {
+        const uniformScaleFactor = instance.source.fig.uniformScaleFactor;
+        if (
+          typeof uniformScaleFactor === "number" &&
+          uniformScaleFactor > 0 &&
+          uniformScaleFactor !== 1
+        ) {
+          target.x *= uniformScaleFactor;
+          target.y *= uniformScaleFactor;
+          derivedLayout.x = target.x;
+          derivedLayout.y = target.y;
+        }
+      }
+      if (fillGeometry.length > 0) {
+        target.fillGeometry = alignGeometryWindingRules(
+          fillGeometry,
+          target.vectorNetwork,
+        );
+      }
+      if (strokeGeometry.length > 0) target.strokeGeometry = strokeGeometry;
+      if (glyphs.length > 0 && target.type === "TEXT") {
+        target.figmaDerivedTextGlyphs = glyphs;
+      }
+      if (Object.keys(derivedLayout).length > 0) {
+        target.figmaDerivedLayout = derivedLayout;
+      }
+    }
+  }
+}
+
+// Kept out of the package root API. These hooks let synthetic fixtures cover
+// the binary geometry and renderer-compatibility rules without checking in a
+// real Figma document.
+export const renderCompatibilityInternals = Object.freeze({
+  preferFigmaDerivedText,
+  preferImportedBooleanGeometry,
+  transformCommandsBlob,
+});
+
 /**
  * Render a local .fig file without enabling OpenPencil's remote font sources.
  * Embedded images remain in memory and are never fetched from or uploaded to a
@@ -226,6 +652,19 @@ export async function renderFigFile(
       { cause: error },
     );
   }
+
+  // Figma export omits editor-only layout grids. OpenPencil falls back to the
+  // original .fig field when the modeled array is empty, so keep a disabled
+  // sentinel in the ephemeral graph to prevent that fallback from drawing the
+  // editor overlay.
+  for (const node of graph.getAllNodes()) {
+    node.layoutGrids = [{ visible: false }];
+  }
+  restoreInheritedSymbolVisibility(graph);
+  restoreDerivedInstanceData(graph);
+  restoreFigmaAffineTransforms(graph);
+  preferImportedBooleanGeometry(graph);
+  preferFigmaDerivedText(graph);
 
   const pages = graph.getPages();
   const pageSourceId = options.page
@@ -299,6 +738,7 @@ export async function renderFigFile(
     bunny: false,
     fontshare: false,
   });
+  fontManager.setHostFontLoader(createSystemFontLoader());
 
   const geometry =
     format === "png"

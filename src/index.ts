@@ -1,4 +1,5 @@
 export { FiggyError } from "./errors.js";
+export { createSystemFontLoader } from "./fonts.js";
 export { inspectDocument } from "./inspect.js";
 export { readGoldenFixture, verifyGolden } from "./golden.js";
 export { normalizeNodeId } from "./model.js";
