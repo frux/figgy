@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.fig
+*.fig.json
+.DS_Store
+
+# Private/NDA fixtures. Never commit or publish anything from this directory,
+# including derived screenshots, decoded JSON, logs, or golden responses.
+for-tests/
+
+# Golden files can contain private design data. Only explicitly curated fixtures
+# below test/fixtures are intended to be committed.
+goldens/private/
