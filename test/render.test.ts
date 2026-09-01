@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { fontManager } from "@open-pencil/core/text";
+import { initCanvasKit } from "@open-pencil/core/io/formats/raster";
 
 import { FiggyError } from "../src/errors.js";
 import { parseFigFile } from "../src/parser.js";
@@ -65,6 +66,26 @@ describe("local rendering", () => {
     assert.equal(result.requestedScale, 1);
     assert.equal(result.effectiveScale, 0.5);
     assert.deepEqual(fontManager.enabledOnlineFontProviders(), []);
+
+    const ck = await initCanvasKit();
+    const image = ck.MakeImageFromEncoded(png);
+    assert.ok(image);
+    const pixels = image.readPixels(0, 0, {
+      alphaType: ck.AlphaType.Unpremul,
+      colorType: ck.ColorType.RGBA_8888,
+      colorSpace: ck.ColorSpace.SRGB,
+      width: image.width(),
+      height: image.height(),
+    });
+    image.delete();
+    assert.ok(pixels instanceof Uint8Array);
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      const isRedGridPixel =
+        pixels[offset]! > 200 &&
+        pixels[offset + 1]! < 50 &&
+        pixels[offset + 2]! < 50;
+      assert.equal(isRedGridPixel, false, "editor layout grids are not exported");
+    }
   });
 
   it("does not overwrite an existing render unless force is explicit", async () => {

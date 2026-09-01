@@ -1,66 +1,195 @@
 # figgy
 
-`figgy` — локальная CLI для чтения и рендера экспортированных файлов Figma
-(`.fig`), а также воспроизведения ответов read-only инструментов официального
-Figma MCP.
+`figgy` is a local MCP server for exported Figma files (`.fig`). Its primary
+use is to replace the official Figma MCP server in supported read-only
+workflows while keeping the design source on the local filesystem and avoiding
+the need for a Figma account or API token.
 
-Проект находится на ранней стадии. Уже работает полный вертикальный срез для
-`get_metadata`: контейнер `.fig` → встроенная Kiwi-схема → дерево узлов →
-разреженный XML → MCP `content[]`. Форма ответа откалибрована по настоящему
-ответу официального MCP; вычисляемая геометрия сложных групп и закрытая
-эвристика Figma `isAsset` пока остаются зонами частичного, а не полного паритета.
+It can also be used as a standalone CLI for inspecting metadata, rendering
+pages and nodes, and comparing responses with saved Figma MCP results.
 
-## Что уже работает
+The current MCP profile exposes two Figma-compatible tools:
 
-- современные `.fig` как ZIP-архивы, включая ZIP data descriptors;
-- старые файлы, начинающиеся непосредственно с `fig-kiwi`;
-- встроенные Kiwi-схемы: файл декодируется своей схемой, без жёсткой привязки к
-  одной версии формата;
-- deflate и zstd payload;
-- восстановление и поиск дерева по Figma GUID (`sessionID:localID`);
-- скрытие internal-only canvas и консервативное сворачивание векторных ассетов;
-- axis-aligned размеры узлов с учётом локальной transform-матрицы;
-- `inspect` для быстрой диагностики файла;
-- `get-metadata` / `get_metadata` с обычным текстовым выводом либо MCP-envelope;
-- локальный `render` страницы или отдельного узла в PNG/SVG;
-- `verify` для сравнения с сохранённым ответом настоящего Figma MCP.
+| Tool | Result |
+| --- | --- |
+| `get_metadata` | Top-level page navigation or sparse XML for a node subtree |
+| `get_screenshot` | A locally rendered PNG in an MCP image content block |
 
-## Установка и запуск
+Metadata and rendering have been calibrated against the official MCP output,
+but `figgy` is not yet a complete replacement for every Figma MCP tool. See
+[`docs/compatibility.md`](docs/compatibility.md) for the current compatibility
+profile.
 
-Требуются Node.js 20 или новее и npm.
+## Install
+
+Node.js 20 or newer and npm are required.
 
 ```bash
+git clone https://github.com/frux/figgy.git
+cd figgy
 npm install
 npm run build
-node dist/cli.js --help
+npm link
 ```
 
-Во время разработки CLI можно запускать без предварительной сборки:
+`npm link` makes the `figgy` executable available to local MCP clients. You can
+skip it and use the absolute path to `dist/cli.js` instead.
+
+## Connect Figgy to an MCP agent
+
+Start one MCP server for all local `.fig` files the agent can access:
+
+```bash
+figgy mcp
+```
+
+The command uses standard input and standard output for the MCP protocol. It
+normally should be started by the agent, not run interactively. A silent
+process is expected until an MCP client connects and sends a request.
+
+### Codex
+
+Register the server with Codex after building and linking the project:
+
+```bash
+codex mcp add figgy -- figgy mcp
+codex mcp get figgy
+```
+
+Start a new Codex session, or reload the client, so the newly registered tools
+are discovered. The agent can now call `get_metadata` and `get_screenshot`
+without a Figma URL, file key, account, or token.
+
+If an older file-bound Figgy command is already registered under this name,
+replace it once:
+
+```bash
+codex mcp remove figgy
+codex mcp add figgy -- figgy mcp
+```
+
+If you did not run `npm link`, register the built entry point directly:
+
+```bash
+codex mcp add figgy -- \
+  node /absolute/path/to/figgy/dist/cli.js \
+  mcp
+```
+
+### Other MCP clients
+
+For clients configured with an `mcpServers` JSON object, use:
+
+```json
+{
+  "mcpServers": {
+    "figgy": {
+      "command": "figgy",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The exact configuration-file location and reload flow depend on the client.
+Prefer an absolute executable path when the client does not inherit your shell
+environment.
+
+### How an agent should use the server
+
+1. Call `get_metadata` with the absolute `filePath` and no `nodeId` to list the
+   document pages.
+2. Call `get_metadata` again with the same `filePath` and a page or node ID to
+   inspect that subtree.
+3. Call `get_screenshot` with `filePath` and the same `nodeId` when visual
+   context is needed.
+
+For example, the conceptual MCP arguments are:
+
+```json
+{
+  "filePath": "/absolute/path/to/layout.fig",
+  "nodeId": "12:34"
+}
+```
+
+`filePath` selects the file independently for every call, so one registered
+Figgy server can work with any number of local designs. Relative paths are
+resolved from the MCP server process's working directory; absolute paths are
+recommended.
+
+`fileKey` is not required. It is accepted and ignored when an agent sends
+arguments shaped like an official Figma MCP call. Node IDs can use either
+canonical `12:34` notation or the URL-style `12-34` notation.
+
+The required local `filePath` in place of the official server's cloud
+`fileKey` is the deliberate input-contract difference between Figgy and Figma
+MCP. Tool names and result content blocks retain the compatible shape.
+
+`get_metadata` supports these arguments:
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `filePath` | string | Required local path to the `.fig` file |
+| `nodeId` | string | Page or node to inspect; omit it to list pages |
+| `maxDepth` | integer | Optional descendant-depth limit |
+| `fileKey` | string | Optional compatibility argument; ignored |
+
+`get_screenshot` supports:
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `filePath` | string | Required local path to the `.fig` file |
+| `nodeId` | string | Render one node |
+| `page` | string | Render a page by exact name or ID |
+| `scale` | number | PNG scale from 0.01 through 8; default `1` |
+| `maxDimension` | integer | Maximum edge length; default `4096`, maximum `8192` |
+| `fileKey` | string | Optional compatibility argument; ignored |
+
+`nodeId` and `page` cannot be used together. With neither selector,
+`get_screenshot` renders the first page from `filePath`.
+
+Decoded metadata is cached for up to 16 recently used paths and automatically
+refreshed when a file's size or filesystem timestamps change. Changing files
+or replacing a `.fig` therefore does not require registering or restarting the
+MCP server.
+
+## Standalone CLI
+
+The existing CLI workflow remains available:
+
+```bash
+figgy inspect ./layout.fig
+figgy get-metadata ./layout.fig
+figgy get-metadata ./layout.fig --node 12:34 --depth 3
+figgy render ./layout.fig --node 12:34 --output ./frame.png
+figgy verify ./layout.fig ./goldens/layout.frame.get_metadata.json
+```
+
+During development, run the CLI without building first:
 
 ```bash
 npm run dev -- inspect /path/to/layout.fig
-npm run dev -- get-metadata /path/to/layout.fig
-npm run dev -- get-metadata /path/to/layout.fig --node 12:34
 npm run dev -- get-metadata /path/to/layout.fig --node 12-34 --format mcp
 npm run dev -- render /path/to/layout.fig --output /tmp/layout.png
 ```
 
-После глобальной установки или `npm link` команда называется `figgy`:
+### Metadata
+
+Without `--node`, `get-metadata` returns the top-level page list. Use
+`--depth 0` to return only the selected node without expanding descendants.
+`--format mcp` wraps the text in an MCP-compatible `content` envelope.
 
 ```bash
-figgy inspect ./layout.fig
+figgy get-metadata ./layout.fig
 figgy get-metadata ./layout.fig --node 12:34 --depth 3
-figgy render ./layout.fig --node 12:34 --output ./frame.png
+figgy get-metadata ./layout.fig --node 12-34 --format mcp
 ```
 
-Без `--node` команда возвращает список страниц. `--node` принимает как
-канонический `12:34`, так и URL-вариант `12-34`. `--depth 0` оставляет только
-выбранный узел, не раскрывая потомков.
+### Local rendering
 
-## Локальный рендер
-
-Без `--node` и `--page` команда рендерит первую страницу. Узел выбирается по
-Figma GUID, а страница — по точному имени или id:
+Without `--node` or `--page`, `render` exports the first page. Select a node by
+Figma GUID or a page by its exact name or ID:
 
 ```bash
 figgy render ./layout.fig --output ./page.png
@@ -68,123 +197,108 @@ figgy render ./layout.fig --page "Main" --format svg --output ./page.svg
 figgy render ./layout.fig --node 12-34 --scale 2 --output ./card@2x.png
 ```
 
-Поддерживаемые форматы первого среза — PNG и SVG. Формат выводится из расширения
-`--output`, если `--format` не задан. PNG по умолчанию вписывается в сторону
-4096 px и общий лимит 4096×4096 пикселей; фактический масштаб, ширина и высота
-возвращаются в JSON-результате команды. Лимит стороны можно уменьшить через
-`--max-dimension`. Существующий файл не перезаписывается без `--force`.
+PNG and SVG are supported. If `--format` is omitted, it is inferred from the
+output extension. PNG output is limited by default to a 4096 px side and a
+total 4096×4096 pixel budget. The command reports the effective scale, width,
+and height as JSON. Existing files are not overwritten unless `--force` is
+provided.
 
-Рендер выполняется headless-движком OpenPencil: он восстанавливает SceneGraph,
-встроенные изображения, векторную геометрию, paints, masks, effects и текст, а
-PNG растеризуется локальным CanvasKit. Это уже полезный локальный preview, но
-пиксельный паритет с официальным Figma MCP `get_screenshot` ещё не измерен.
+Rendering uses OpenPencil's headless engine to reconstruct the SceneGraph,
+embedded images, vector geometry, paints, masks, effects, and text. PNG output
+is rasterized locally with CanvasKit. Before export, `figgy` restores:
 
-Все сетевые источники шрифтов принудительно отключены. Это исключает утечку
-названий шрифтов и текстовых подмножеств из NDA-макета, однако отсутствующий
-локально шрифт будет заменён встроенным fallback и может изменить метрики текста.
-PNG и особенно SVG сами содержат данные макета и должны обрабатываться как такие
-же приватные артефакты, что и исходный `.fig`.
+- exact glyph outlines and positions stored in the FIG payload;
+- derived geometry and layout data for overridden instances;
+- inherited visibility for nested component variants;
+- full affine transforms, including shear;
+- imported boolean contours that would otherwise be recomputed from child
+  shapes.
 
-## Проверка совместимости
+Editor layout grids are excluded from exported images. Online font providers
+are disabled; fonts are resolved only from standard system directories and
+paths listed in `FIGGY_FONT_DIRS`. When a `.fig` file contains Figma-derived
+glyph outlines, they take priority over reshaping text with a locally installed
+font.
 
-Сохраните сырой MCP tool result официального `get_metadata` в golden-файл по
-схеме из [`goldens/README.md`](goldens/README.md), затем выполните:
+### Pixel comparison
+
+Use the render comparison helper to measure visual parity:
+
+```bash
+npm run compare:renders -- ./reference.png ./local.png ./diff.png
+```
+
+It verifies image dimensions and reports exact-pixel ratio, MAE, RMSE, PSNR,
+and percentages above several pixel-delta thresholds. If a third path is
+provided, it writes a red difference heatmap.
+
+### Golden verification
+
+Save the raw result of the official MCP `get_metadata` tool in the format
+described in [`goldens/README.md`](goldens/README.md), then run:
 
 ```bash
 figgy verify ./layout.fig ./goldens/layout.frame.get_metadata.json
 ```
 
-Коды завершения:
+Exit codes are `0` for a match, `1` for invalid input, and `2` for a completed
+comparison that found a difference. Line endings are normalized, while
+meaningful fields remain untouched.
 
-- `0` — локальный MCP-envelope совпал с эталоном;
-- `1` — файл, аргументы или golden некорректны;
-- `2` — сравнение выполнено, но найдено расхождение.
+## Supported FIG data
 
-`verify` сообщает путь к первому отличию, например
-`$.content[0].text`. Переносы строк CRLF/LF нормализуются; содержательные поля
-не «подчищаются», чтобы несовместимость не скрывалась.
+- modern `.fig` ZIP archives, including ZIP data descriptors;
+- legacy files that start directly with `fig-kiwi`;
+- each file's embedded Kiwi schema instead of one hard-coded format version;
+- deflate and zstd payloads;
+- node-tree reconstruction and lookup by Figma GUID;
+- filtering of internal-only canvases and conservative vector-asset collapsing;
+- axis-aligned node dimensions derived from local transform matrices.
 
-## Что означает «такой же ответ»
+## Compatibility model
 
-Цель разбита на четыре проверяемых уровня:
+Compatibility is tested at four independent levels:
 
-1. **Transport parity** — те же типы MCP content blocks и ошибки.
-2. **Structural parity** — те же узлы, порядок, свойства и форма ответа.
-3. **Semantic parity** — эквивалентные layout, typography, paints, variables и
-   component semantics.
-4. **Visual parity** — screenshot/assets сравниваются пиксельно либо с явно
-   заданным порогом.
+1. **Transport:** MCP tool names, arguments, content blocks, and errors.
+2. **Structure:** nodes, order, properties, and response shape.
+3. **Semantics:** layout, typography, paints, variables, and components.
+4. **Visual output:** image dimensions and pixel or perceptual differences.
 
-Побайтовое равенство не всегда осмысленно: официальный `get_design_context`
-по умолчанию генерирует React + Tailwind, а asset URL могут быть временными.
-Такие поля будут нормализоваться только явно и только после того, как реальный
-golden подтвердит их недетерминированность. Полная матрица находится в
-[`docs/compatibility.md`](docs/compatibility.md).
+Byte-for-byte equality is not meaningful for every official tool. For example,
+temporary asset URLs and generated code can be nondeterministic. Normalization
+should be introduced only when a captured result demonstrates that a field is
+nondeterministic.
 
-## Архитектура
+## Architecture
 
 ```text
-.fig
-  └─ archive.ts       ZIP/legacy container, lazy archive entry reads
-      └─ decoder.ts   fig-kiwi framing, deflate/zstd, embedded schema
-          └─ model.ts node changes → indexed tree
-              ├─ compatibility/metadata.ts
-              ├─ inspect.ts
-              └─ golden.ts
+agent ↔ stdio MCP ↔ mcp.ts
+                       ├─ get_metadata
+                       │    └─ archive → Kiwi decoder → indexed node tree → XML
+                       └─ get_screenshot
+                            └─ OpenPencil FIG import → SceneGraph → CanvasKit PNG
 
-.fig
-  └─ render.ts        OpenPencil FIG import → SceneGraph
-      ├─ SVG export   local vector output
-      └─ CanvasKit    local PNG rasterization
+standalone CLI ────────┴─ the same metadata and rendering functions
 ```
 
-Транспорт специально отделён от модели. После стабилизации контрактов поверх
-тех же функций можно добавить stdio MCP server, не дублируя декодер и
-совместимость.
+The MCP transport, document model, and renderer remain separate, so the CLI
+and server use the same implementation rather than maintaining parallel paths.
 
-## Разработка
+## Development
 
 ```bash
 npm run check
 npm run test:coverage
 ```
 
-Тестовый `.fig` генерируется актуальным `@open-pencil/kiwi` во время теста. Отдельный
-интеграционный fixture формирует ZIP с data descriptors, поэтому тесты не
-зависят от приватных макетов или установленной Figma.
+Tests generate synthetic `.fig` files with `@open-pencil/kiwi` and
+`@open-pencil/core`. The MCP integration test launches `figgy mcp` through the
+official Model Context Protocol stdio client, lists its tools, requests
+metadata, and validates a returned PNG. No external design files or installed
+Figma application are required by the test suite.
 
-Формат `.fig` закрыт и официально не документирован. Реализация использует
-встроенную в файл Kiwi-схему и опирается на открытый формат
-[Kiwi](https://github.com/evanw/kiwi). Актуальный набор и назначение MCP tools
-описаны в [официальной документации Figma](https://developers.figma.com/docs/figma-mcp-server/tools-and-prompts/).
-
-## Приватные макеты
-
-Файлы `.fig`, каталог `for-tests/` и `goldens/private/` игнорируются Git.
-Публикуемый npm-пакет дополнительно ограничен allowlist-полем `files` и содержит
-только `dist/`, `README.md` и `LICENSE`. Перед релизом это следует перепроверять
-через `npm pack --dry-run --json`.
-
-Нельзя коммитить сырые официальные MCP-ответы: XML содержит названия слоёв и
-прочие данные макета. Для приватной калибровки храните их только в
-`goldens/private/` либо используйте временный in-memory diff.
-
-Отрендеренные PNG/SVG также являются производными приватного макета. Вывод по
-умолчанию создаётся рядом с исходным `.fig`, поэтому для файлов внутри
-`for-tests/` он автоматически остаётся под игнором всего каталога. При явном
-`--output` ответственность за безопасный путь лежит на вызывающей стороне.
-
-## Следующий необходимый вход
-
-Для расширения профиля нужны дополнительные синхронизированные пары `.fig` и
-сырых ответов официального Figma MCP для того же состояния файла:
-
-- `get_metadata`;
-- `get_variable_defs`;
-- `get_screenshot`;
-- `get_design_context` с зафиксированными `clientLanguages` и
-  `clientFrameworks`.
-
-В репозиторий следует добавлять только специально подготовленные обезличенные
-фикстуры. Для геометрических golden-тестов важно, чтобы локальный экспорт и
-облачный запрос относились к одной версии макета.
+The `.fig` format is closed and not officially documented. This implementation
+reads the Kiwi schema embedded in each file and builds on the open
+[Kiwi](https://github.com/evanw/kiwi) format. The official Figma MCP tools and
+their intended use are documented in the
+[Figma developer documentation](https://developers.figma.com/docs/figma-mcp-server/tools-and-prompts/).

@@ -12,6 +12,14 @@ export async function syntheticRenderableFig(): Promise<Uint8Array> {
     y: 20,
     width: 120,
     height: 80,
+    layoutGrids: [
+      {
+        pattern: "GRID",
+        sectionSize: 10,
+        color: { r: 1, g: 0, b: 0, a: 1 },
+        visible: true,
+      },
+    ],
     fills: [
       {
         type: "SOLID",

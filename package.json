@@ -1,7 +1,7 @@
 {
   "name": "figgy",
   "version": "0.1.0",
-  "description": "Offline CLI for rendering Figma .fig files and producing Figma MCP-compatible responses",
+  "description": "Local MCP server and CLI for exported Figma .fig files",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/frux/figgy.git"
@@ -30,6 +30,7 @@
     "dev": "tsx src/cli.ts",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "test:coverage": "node --test --experimental-test-coverage --import tsx 'test/**/*.test.ts'",
+    "compare:renders": "node scripts/compare-renders.mjs",
     "check": "npm run build && npm test"
   },
   "engines": {
@@ -40,12 +41,15 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
     "@open-pencil/core": "^0.14.0",
     "@open-pencil/kiwi": "^0.14.0",
     "fzstd": "^0.1.1",
-    "yauzl": "^3.2.0"
+    "yauzl": "^3.2.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^22.10.0",
     "@types/yauzl": "^2.10.3",
     "tsx": "^4.19.2",

@@ -1,7 +1,9 @@
 export { FiggyError } from "./errors.js";
+export { createSystemFontLoader } from "./fonts.js";
 export { inspectDocument } from "./inspect.js";
 export { readGoldenFixture, verifyGolden } from "./golden.js";
 export { normalizeNodeId } from "./model.js";
+export { createFiggyMcpServer, runFiggyMcpServer } from "./mcp.js";
 export { parseFigFile } from "./parser.js";
 export { renderFigFile } from "./render.js";
 export {
