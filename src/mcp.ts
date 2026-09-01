@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -10,9 +10,11 @@ import { getMetadataMcpResult } from "./compatibility/metadata.js";
 import { describeError } from "./errors.js";
 import { parseFigFile } from "./parser.js";
 import { renderFigFile } from "./render.js";
+import type { FigDocument } from "./types.js";
 
 const SERVER_NAME = "figgy";
 const SERVER_VERSION = "0.1.0";
+const MAX_CACHED_DOCUMENTS = 16;
 
 const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -28,24 +30,55 @@ function toolError(error: unknown): CallToolResult {
   };
 }
 
-/**
- * Create an MCP server bound to one local .fig file.
- *
- * The metadata document is decoded once when the server starts. Screenshot
- * rendering intentionally reopens the file so the renderer can use its own
- * complete SceneGraph import pipeline.
- */
-export async function createFiggyMcpServer(inputPath: string): Promise<McpServer> {
-  const absoluteInput = resolve(inputPath);
-  const document = await parseFigFile(absoluteInput);
+interface CachedDocument {
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  document: FigDocument;
+}
+
+/** Create an MCP server that can read any local .fig path supplied by a tool call. */
+export function createFiggyMcpServer(): McpServer {
+  const metadataCache = new Map<string, CachedDocument>();
+
+  const loadMetadata = async (filePath: string): Promise<FigDocument> => {
+    const absoluteInput = resolve(filePath);
+    const before = await stat(absoluteInput);
+    const cached = metadataCache.get(absoluteInput);
+    if (
+      cached?.size === before.size &&
+      cached.mtimeMs === before.mtimeMs &&
+      cached.ctimeMs === before.ctimeMs
+    ) {
+      metadataCache.delete(absoluteInput);
+      metadataCache.set(absoluteInput, cached);
+      return cached.document;
+    }
+
+    const document = await parseFigFile(absoluteInput);
+    const after = await stat(absoluteInput);
+    metadataCache.set(absoluteInput, {
+      size: after.size,
+      mtimeMs: after.mtimeMs,
+      ctimeMs: after.ctimeMs,
+      document,
+    });
+    if (metadataCache.size > MAX_CACHED_DOCUMENTS) {
+      const oldest = metadataCache.keys().next().value;
+      if (oldest !== undefined) metadataCache.delete(oldest);
+    }
+    return document;
+  };
+
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions: [
-        "This server is bound to one local Figma .fig file.",
-        "Call get_metadata without nodeId to list pages, then call it with a page or node id to inspect a subtree.",
-        "Call get_screenshot to see the first page, a selected page, or a selected node.",
-        "No fileKey is required; an optional fileKey is accepted only for compatibility with Figma MCP calls.",
+        "This server reads local Figma .fig files by path.",
+        "Every tool call requires filePath; use an absolute path whenever possible.",
+        "Call get_metadata without nodeId to list pages, then call it with the same filePath and a page or node id to inspect a subtree.",
+        "Call get_screenshot with filePath to see the first page, a selected page, or a selected node.",
+        "An optional fileKey is accepted only for compatibility with Figma MCP calls.",
       ].join(" "),
     },
   );
@@ -55,13 +88,17 @@ export async function createFiggyMcpServer(inputPath: string): Promise<McpServer
     {
       title: "Get Figma metadata",
       description:
-        "Return sparse Figma MCP-style metadata from the local .fig file. Omit nodeId to list top-level pages.",
+        "Return sparse Figma MCP-style metadata from a local .fig file. Omit nodeId to list top-level pages.",
       inputSchema: z.object({
+        filePath: z
+          .string()
+          .min(1)
+          .describe("Local path to the .fig file. Absolute paths are recommended."),
         fileKey: z
           .string()
           .optional()
           .describe(
-            "Accepted for Figma MCP compatibility and ignored because this server is already bound to one local file.",
+            "Accepted for Figma MCP compatibility and ignored; use filePath to select the local file.",
           ),
         nodeId: z
           .string()
@@ -76,8 +113,9 @@ export async function createFiggyMcpServer(inputPath: string): Promise<McpServer
       }),
       annotations: readOnlyAnnotations,
     },
-    async ({ nodeId, maxDepth }): Promise<CallToolResult> => {
+    async ({ filePath, nodeId, maxDepth }): Promise<CallToolResult> => {
       try {
+        const document = await loadMetadata(filePath);
         const result = getMetadataMcpResult(document, {
           includeImplementationInstruction: false,
           ...(nodeId !== undefined ? { nodeId } : {}),
@@ -97,14 +135,18 @@ export async function createFiggyMcpServer(inputPath: string): Promise<McpServer
     {
       title: "Get Figma screenshot",
       description:
-        "Render the local .fig file to PNG and return it as an MCP image content block.",
+        "Render a local .fig file to PNG and return it as an MCP image content block.",
       inputSchema: z
         .object({
+          filePath: z
+            .string()
+            .min(1)
+            .describe("Local path to the .fig file. Absolute paths are recommended."),
           fileKey: z
             .string()
             .optional()
             .describe(
-              "Accepted for Figma MCP compatibility and ignored because this server is already bound to one local file.",
+              "Accepted for Figma MCP compatibility and ignored; use filePath to select the local file.",
             ),
           nodeId: z
             .string()
@@ -133,7 +175,14 @@ export async function createFiggyMcpServer(inputPath: string): Promise<McpServer
         }),
       annotations: readOnlyAnnotations,
     },
-    async ({ nodeId, page, scale, maxDimension }): Promise<CallToolResult> => {
+    async ({
+      filePath,
+      nodeId,
+      page,
+      scale,
+      maxDimension,
+    }): Promise<CallToolResult> => {
+      const absoluteInput = resolve(filePath);
       const temporaryDirectory = await mkdtemp(join(tmpdir(), "figgy-mcp-render-"));
       const outputPath = join(temporaryDirectory, "screenshot.png");
 
@@ -168,7 +217,7 @@ export async function createFiggyMcpServer(inputPath: string): Promise<McpServer
 }
 
 /** Run a Figgy MCP server over the current process's stdin and stdout. */
-export async function runFiggyMcpServer(inputPath: string): Promise<void> {
-  const server = await createFiggyMcpServer(inputPath);
+export async function runFiggyMcpServer(): Promise<void> {
+  const server = createFiggyMcpServer();
   await server.connect(new StdioServerTransport());
 }

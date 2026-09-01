@@ -15,9 +15,9 @@ Code Connect и поиск по облачным библиотекам не в�
 
 | Official tool | Status | Intended comparison |
 | --- | --- | --- |
-| `get_metadata` | Implemented, real-response calibrated; partial geometry/asset parity | Exact XML and MCP text envelope after CRLF normalization |
+| `get_metadata` | Implemented, real-response calibrated; local MCP requires `filePath` instead of the official cloud `fileKey`; partial geometry/asset parity | Exact XML and MCP text envelope after CRLF normalization |
 | `get_variable_defs` | Planned | Exact token names/values and content block shape |
-| `get_screenshot` | Implemented as an MCP PNG image block; visual parity is calibrated for the current render profile | MIME/dimensions plus pixel or perceptual diff |
+| `get_screenshot` | Implemented as an MCP PNG image block; local MCP requires `filePath` instead of the official cloud `fileKey`; visual parity is calibrated for the current render profile | MIME/dimensions plus pixel or perceptual diff |
 | `get_design_context` | Planned | Structural/semantic comparison; declared normalization for ephemeral asset URLs |
 | `download_assets` | Later | Exact original bytes where embedded; rendered-export parity by image diff |
 | `get_motion_context` | Later, corpus-dependent | Structured tracks and generated code semantics |

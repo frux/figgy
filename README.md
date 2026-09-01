@@ -37,10 +37,10 @@ skip it and use the absolute path to `dist/cli.js` instead.
 
 ## Connect Figgy to an MCP agent
 
-An MCP server process is bound to one `.fig` file:
+Start one MCP server for all local `.fig` files the agent can access:
 
 ```bash
-figgy mcp /absolute/path/to/layout.fig
+figgy mcp
 ```
 
 The command uses standard input and standard output for the MCP protocol. It
@@ -52,7 +52,7 @@ process is expected until an MCP client connects and sends a request.
 Register the server with Codex after building and linking the project:
 
 ```bash
-codex mcp add figgy -- figgy mcp /absolute/path/to/layout.fig
+codex mcp add figgy -- figgy mcp
 codex mcp get figgy
 ```
 
@@ -60,20 +60,20 @@ Start a new Codex session, or reload the client, so the newly registered tools
 are discovered. The agent can now call `get_metadata` and `get_screenshot`
 without a Figma URL, file key, account, or token.
 
+If an older file-bound Figgy command is already registered under this name,
+replace it once:
+
+```bash
+codex mcp remove figgy
+codex mcp add figgy -- figgy mcp
+```
+
 If you did not run `npm link`, register the built entry point directly:
 
 ```bash
 codex mcp add figgy -- \
   node /absolute/path/to/figgy/dist/cli.js \
-  mcp /absolute/path/to/layout.fig
-```
-
-Use a different server name for each file when several designs must be
-available at the same time:
-
-```bash
-codex mcp add figgy-mobile -- figgy mcp /absolute/path/to/mobile.fig
-codex mcp add figgy-web -- figgy mcp /absolute/path/to/web.fig
+  mcp
 ```
 
 ### Other MCP clients
@@ -85,31 +85,52 @@ For clients configured with an `mcpServers` JSON object, use:
   "mcpServers": {
     "figgy": {
       "command": "figgy",
-      "args": ["mcp", "/absolute/path/to/layout.fig"]
+      "args": ["mcp"]
     }
   }
 }
 ```
 
 The exact configuration-file location and reload flow depend on the client.
-Prefer absolute paths for both the executable and `.fig` file when the client
-does not inherit your shell environment.
+Prefer an absolute executable path when the client does not inherit your shell
+environment.
 
 ### How an agent should use the server
 
-1. Call `get_metadata` without `nodeId` to list the document pages.
-2. Call `get_metadata` again with a page or node ID to inspect that subtree.
-3. Call `get_screenshot` with the same `nodeId` when visual context is needed.
+1. Call `get_metadata` with the absolute `filePath` and no `nodeId` to list the
+   document pages.
+2. Call `get_metadata` again with the same `filePath` and a page or node ID to
+   inspect that subtree.
+3. Call `get_screenshot` with `filePath` and the same `nodeId` when visual
+   context is needed.
 
-The server is already bound to a file, so `fileKey` is not required. It is
-accepted and ignored when an agent sends arguments shaped like an official
-Figma MCP call. Node IDs can use either canonical `12:34` notation or the
-URL-style `12-34` notation.
+For example, the conceptual MCP arguments are:
+
+```json
+{
+  "filePath": "/absolute/path/to/layout.fig",
+  "nodeId": "12:34"
+}
+```
+
+`filePath` selects the file independently for every call, so one registered
+Figgy server can work with any number of local designs. Relative paths are
+resolved from the MCP server process's working directory; absolute paths are
+recommended.
+
+`fileKey` is not required. It is accepted and ignored when an agent sends
+arguments shaped like an official Figma MCP call. Node IDs can use either
+canonical `12:34` notation or the URL-style `12-34` notation.
+
+The required local `filePath` in place of the official server's cloud
+`fileKey` is the deliberate input-contract difference between Figgy and Figma
+MCP. Tool names and result content blocks retain the compatible shape.
 
 `get_metadata` supports these arguments:
 
 | Argument | Type | Description |
 | --- | --- | --- |
+| `filePath` | string | Required local path to the `.fig` file |
 | `nodeId` | string | Page or node to inspect; omit it to list pages |
 | `maxDepth` | integer | Optional descendant-depth limit |
 | `fileKey` | string | Optional compatibility argument; ignored |
@@ -118,18 +139,20 @@ URL-style `12-34` notation.
 
 | Argument | Type | Description |
 | --- | --- | --- |
+| `filePath` | string | Required local path to the `.fig` file |
 | `nodeId` | string | Render one node |
 | `page` | string | Render a page by exact name or ID |
 | `scale` | number | PNG scale from 0.01 through 8; default `1` |
 | `maxDimension` | integer | Maximum edge length; default `4096`, maximum `8192` |
 | `fileKey` | string | Optional compatibility argument; ignored |
 
-`nodeId` and `page` cannot be used together. With neither argument,
-`get_screenshot` renders the first page.
+`nodeId` and `page` cannot be used together. With neither selector,
+`get_screenshot` renders the first page from `filePath`.
 
-Metadata is decoded when the MCP server starts. Restart the server or agent
-session after replacing the `.fig` file so metadata and screenshots refer to
-the same revision.
+Decoded metadata is cached for up to 16 recently used paths and automatically
+refreshed when a file's size or filesystem timestamps change. Changing files
+or replacing a `.fig` therefore does not require registering or restarting the
+MCP server.
 
 ## Standalone CLI
 
