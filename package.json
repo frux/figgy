@@ -1,0 +1,54 @@
+{
+  "name": "figgy",
+  "version": "0.1.0",
+  "description": "Offline CLI for rendering Figma .fig files and producing Figma MCP-compatible responses",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frux/figgy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/frux/figgy/issues"
+  },
+  "homepage": "https://github.com/frux/figgy#readme",
+  "type": "module",
+  "bin": {
+    "figgy": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "test:coverage": "node --test --experimental-test-coverage --import tsx 'test/**/*.test.ts'",
+    "check": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "unifont": "0.7.4"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@open-pencil/core": "^0.14.0",
+    "@open-pencil/kiwi": "^0.14.0",
+    "fzstd": "^0.1.1",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/yauzl": "^2.10.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
