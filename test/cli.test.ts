@@ -34,6 +34,20 @@ function runCli(...args: string[]) {
 }
 
 describe("figgy CLI", () => {
+  it("documents the dedicated MCP mode", () => {
+    const result = runCli("mcp", "--help");
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^figgy mcp <file\.fig>/);
+    assert.match(result.stdout, /get_metadata/);
+    assert.match(result.stdout, /get_screenshot/);
+  });
+
+  it("requires an input file for MCP mode", () => {
+    const result = runCli("mcp");
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /CLI_FILE_MISSING/);
+  });
+
   it("prints a machine-readable inspection", async () => {
     const result = runCli("inspect", await fixturePath());
     assert.equal(result.status, 0, result.stderr);

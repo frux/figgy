@@ -6,6 +6,7 @@ import { getMetadataMcpResult, getMetadataText } from "./compatibility/metadata.
 import { FiggyError, describeError } from "./errors.js";
 import { readGoldenFixture, verifyGolden } from "./golden.js";
 import { inspectDocument } from "./inspect.js";
+import { runFiggyMcpServer } from "./mcp.js";
 import { parseFigFile } from "./parser.js";
 import { renderFigFile, type RenderFormat } from "./render.js";
 
@@ -13,15 +14,17 @@ const VERSION = "0.1.0";
 
 const HELP = `figgy ${VERSION}
 
-Offline CLI for local Figma .fig files.
+Local MCP server and standalone CLI for Figma .fig files.
 
 Usage:
+  figgy mcp <file.fig>
   figgy inspect <file.fig>
   figgy get-metadata <file.fig> [--node <session:local>] [options]
   figgy render <file.fig> [--node <session:local> | --page <name-or-id>] [options]
   figgy verify <file.fig> <golden.json>
 
 Commands:
+  mcp              Serve one local .fig file as an MCP server over stdio
   inspect          Print a JSON summary of the archive and document tree
   get-metadata     Emit sparse Figma MCP-style XML (alias: get_metadata)
   render           Render a page or node to a local PNG/SVG file
@@ -47,6 +50,15 @@ render options:
 General options:
   -h, --help       Show this help
   -v, --version    Show the version
+`;
+
+const MCP_HELP = `figgy mcp <file.fig>
+
+Run a read-only MCP server over stdio, bound to one local Figma .fig file.
+
+Tools:
+  get_metadata      List pages or return sparse XML for a node subtree
+  get_screenshot    Render a page or node and return a PNG image block
 `;
 
 interface MetadataArguments {
@@ -222,6 +234,19 @@ async function runInspect(args: string[]): Promise<void> {
   process.stdout.write(`${JSON.stringify(inspectDocument(document), null, 2)}\n`);
 }
 
+async function runMcp(args: string[]): Promise<void> {
+  if (args[0] === "-h" || args[0] === "--help") {
+    process.stdout.write(MCP_HELP);
+    return;
+  }
+  const [file, extra] = args;
+  if (!file) throw new FiggyError("mcp requires a .fig file", "CLI_FILE_MISSING");
+  if (extra) {
+    throw new FiggyError(`Unexpected argument ${extra}`, "CLI_ARGUMENT_UNKNOWN");
+  }
+  await runFiggyMcpServer(resolve(file));
+}
+
 async function runMetadata(args: string[]): Promise<void> {
   const options = parseMetadataArguments(args);
   const document = await parseFigFile(resolve(options.file));
@@ -301,7 +326,8 @@ export async function main(args: readonly string[]): Promise<number> {
   }
 
   try {
-    if (command === "inspect") await runInspect(rest);
+    if (command === "mcp") await runMcp(rest);
+    else if (command === "inspect") await runInspect(rest);
     else if (command === "get-metadata" || command === "get_metadata") {
       await runMetadata(rest);
     } else if (command === "render") {
