@@ -12,7 +12,7 @@ import { runFiggyMcpServer } from "./mcp.js";
 import { parseFigFile } from "./parser.js";
 import { renderFigFile, type RenderFormat } from "./render.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 const HELP = `figgy ${VERSION}
 

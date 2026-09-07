@@ -44,7 +44,7 @@ describe("figgy CLI", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "0.1.0\n");
+    assert.equal(result.stdout, "0.1.1\n");
   });
 
   it("documents the dedicated MCP mode", () => {
