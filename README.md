@@ -24,6 +24,14 @@ profile.
 
 Node.js 20 or newer and npm are required.
 
+Install the published package globally:
+
+```bash
+npm install --global @frux/figgy
+```
+
+Or build and link it from source:
+
 ```bash
 git clone https://github.com/frux/figgy.git
 cd figgy
@@ -49,7 +57,8 @@ process is expected until an MCP client connects and sends a request.
 
 ### Codex
 
-Register the server with Codex after building and linking the project:
+Register the server with Codex after installing the package or building and
+linking the project:
 
 ```bash
 codex mcp add figgy -- figgy mcp

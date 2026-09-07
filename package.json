@@ -1,5 +1,5 @@
 {
-  "name": "figgy",
+  "name": "@frux/figgy",
   "version": "0.1.0",
   "description": "Local MCP server and CLI for exported Figma .fig files",
   "repository": {
@@ -10,9 +10,12 @@
     "url": "https://github.com/frux/figgy/issues"
   },
   "homepage": "https://github.com/frux/figgy#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
-    "figgy": "./dist/cli.js"
+    "figgy": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -45,6 +48,7 @@
     "@open-pencil/core": "^0.14.0",
     "@open-pencil/kiwi": "^0.14.0",
     "fzstd": "^0.1.1",
+    "unifont": "0.7.4",
     "yauzl": "^3.2.0",
     "zod": "^4.5.4"
   },

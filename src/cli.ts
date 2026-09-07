@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { getMetadataMcpResult, getMetadataText } from "./compatibility/metadata.js";
 import { FiggyError, describeError } from "./errors.js";
@@ -348,6 +350,10 @@ export async function main(args: readonly string[]): Promise<number> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const entrypoint = process.argv[1];
+if (
+  entrypoint !== undefined &&
+  realpathSync(entrypoint) === realpathSync(fileURLToPath(import.meta.url))
+) {
   process.exitCode = await main(process.argv.slice(2));
 }

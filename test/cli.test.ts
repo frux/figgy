@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,19 @@ function runCli(...args: string[]) {
 }
 
 describe("figgy CLI", () => {
+  it("runs when invoked through a package-manager symlink", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "figgy-cli-link-test-"));
+    const executable = join(directory, "figgy");
+    await symlink(resolve(PROJECT_ROOT, "dist/cli.js"), executable);
+
+    const result = spawnSync(process.execPath, [executable, "--version"], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "0.1.0\n");
+  });
+
   it("documents the dedicated MCP mode", () => {
     const result = runCli("mcp", "--help");
     assert.equal(result.status, 0, result.stderr);
